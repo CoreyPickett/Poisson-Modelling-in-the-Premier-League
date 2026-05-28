@@ -1,0 +1,540 @@
+---
+title: "Poisson Modelling within the English Premier League"
+author:
+  - "Samuel Bleechmore"
+  - "Timothy Anderson"
+  - "Corey Pickett"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: TRUE
+header-includes:
+   - \usepackage[round]{natbib}
+   - \usepackage{ifthen}
+   - \usepackage{attachfile2}
+   - \usepackage{tikz}
+   - \usepackage{xstring}
+   - \usepackage{enumitem}
+   - \usepackage{amsmath}
+   - \usepackage{amsthm}
+   - \usetikzlibrary{snakes}
+   - \usetikzlibrary{trees}
+   - \usetikzlibrary{matrix,arrows,decorations.pathmorphing}
+   - \usetikzlibrary{decorations.pathreplacing,calc}
+   - \usetikzlibrary{shapes}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+options(repos="https://cran.rstudio.com")
+```
+
+# Overview
+
+Soccer is a globally popular sport in which two teams compete to score
+the most goals within a 90-minute match. Each team fields eleven
+players, and goals are relatively rare events compared to other aspects
+of gameplay such as passes, tackles, and shots. Because goals occur
+infrequently and largely independently of one another, it is common to
+model them using a Poisson process, where the number of goals scored in
+a fixed time interval follows a Poisson distribution. This modelling
+framework assumes that events occur independently and at a constant
+average rate, making it suitable for describing goal-scoring patterns in
+soccer matches.
+
+The English Premier League (EPL) is one of the most competitive and
+widely analysed soccer leagues in the world. Statistical models such as
+the Poisson distribution are frequently used in sports analytics to
+evaluate team performance, predict match outcomes, and inform betting
+markets. Understanding whether the number of goals scored per match
+follows a Poisson distribution can provide valuable insights into the
+underlying dynamics of scoring and help determine whether assumptions
+made by predictive models are valid.
+
+In this project, we will explore whether the distribution of goals
+scored by teams in the 2023--24 EPL season is well-approximated by a
+Poisson model. Specifically, we will compare the observed distribution
+of goals per game with theoretical Poisson distributions and investigate
+whether home and away teams exhibit different scoring rates. Given the
+well-documented phenomenon of home-field advantage in soccer, we expect
+the mean number of goals per game (the Poisson rate parameter,
+$\lambda$) to be higher for home teams than for away teams.
+
+\newpage
+
+# The Data
+
+The **worldfootballR** package provides programmatic access to
+comprehensive football (soccer) data from FBref.com , including match
+results, player statistics, and competition-level summaries across
+multiple leagues and seasons. For this project, we extracted data from
+the 2023--24 English Premier League (EPL) men's competition using the
+package's built-in scraping functions.
+
+The data collection process began by scraping all match URLs for the
+target season using the `fb_match_urls()` function. These URLs were then
+used to retrieve detailed match results through the `fb_match_urls()`
+function. To ensure data quality, matches with missing goal information
+were excluded. From the cleaned dataset, a random sample of 50 matches
+was drawn for analysis to maintain a manageable yet representative
+subset of games.
+
+The data can be obtained and imported into `R` with the following code:
+
+```{r}
+library(worldfootballR)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+
+# Scraping the match URLs for the EPL 2023-24, men's competition
+match_urls = fb_match_urls(
+  country = "ENG",
+  gender = "M",
+  season_end_year = 2024,
+  tier = "1st"
+)
+
+# Using the scraped match URLs to get match data
+match_data = fb_match_results(
+  country = "ENG",
+  gender = "M",
+  season_end_year = 2024,
+  tier = "1st"
+)
+
+# Removing any matches with missing data
+match_data_clean = filter(match_data, !is.na(HomeGoals) & !is.na(AwayGoals))
+
+# Randomly sampling 50 matches
+sample_50_matches = sample_n(match_data_clean, 50)
+
+# Converting dataset into long format for easier data analysis
+# Will give 1 row per team per match
+sample_long_select = select(sample_50_matches, Date, Home, Away, HomeGoals, AwayGoals)
+sample_long_select
+
+sample_long_pivot = pivot_longer(
+  sample_long_select,
+  cols = c(HomeGoals, AwayGoals),
+  names_to = "side",
+  values_to = "goals"
+)
+
+sample_long_mutate = mutate(
+  sample_long_pivot,
+  team_side = if_else(side == "HomeGoals", "Home", "Away")
+)
+
+# Display relevant features
+sample_long = select(
+  sample_long_mutate,
+  Date,
+  match_id = Home,
+  opponent = Away,
+  team_side,
+  goals
+)
+
+# Home Goals for sample
+home_goals = match_data_clean$HomeGoals
+# Away Goals for sample
+away_goals = match_data_clean$AwayGoals
+```
+
+# Topics Covered
+
+The STAT2300 topics covered in this project include:
+
+\begin{itemize}
+
+\item \textbf{Maximum likelihood estimation (MLE)} --- the number of
+goals scored by a team in a match can be reasonably modelled by a
+Poisson distribution; we therefore use maximum likelihood estimation to
+estimate the rate parameter $\lambda$, representing the average goals
+scored per match for home and away teams in the 2023--24 English Premier
+League season.
+
+\item \textbf{QQ plot and Kolmogorov–Smirnov test} --- we use QQ plots
+to visually assess whether it is reasonable to assume that goal counts
+follow a Poisson distribution, and apply the Kolmogorov--Smirnov test to
+formally evaluate the goodness of fit between the empirical and
+theoretical Poisson distributions.
+
+\item \textbf{Confidence interval using the Newton–Raphson method} ---
+after verifying that the Poisson distribution adequately describes the
+data, we employ the Newton--Raphson procedure to numerically determine
+the limits of a likelihood-based confidence interval for the rate
+parameter $\lambda$, providing a 95% likelihood interval for the
+expected number of goals scored per match.
+
+\end{itemize}
+
+# Results
+
+## Maximum likelihood estimation
+
+The Poisson distribution is a discrete probability distribution commonly
+used to model the number of events occurring in a fixed interval of time
+or space when these events occur independently and at a constant rate.
+In our context, the number of goals scored by a team in a football match
+can reasonably be assumed to follow a Poisson distribution, provided
+scoring events are independent and occur at a roughly constant rate
+throughout the match.
+
+For a Poisson random variable $X$ with rate parameter $\lambda >0$, the
+probability mass function (PMF) is given by:
+
+$$
+f(x; \lambda) = \frac{e^{-\lambda} \lambda^x}{x!}, \quad x = 0, 1, 2, \ldots
+$$
+
+We can use maximum likelihood estimation (MLE) to estimate $\lambda$,
+representing the average number of goals scored per match for home and
+away teams, respectively.
+
+The likelihood function for a random sample $X= (X_1, X_2,...,X_n)$ is:
+
+$$
+\begin{aligned}\mathcal{L}(\lambda|\mathbf{X}) &= \prod_{i = 1}^n \frac{e^{-\lambda}\lambda^{X_i}}{X_i!}\\&= e^{-n\lambda}\lambda^{\sum_{i=1}^n X_i}\left(\prod_{i=1}^n X_i!\right)^{-1}\end{aligned}
+$$
+
+Taking the natural logarithm gives the log-likelihood function:
+
+$$
+\begin{aligned}\ell(\lambda|\mathbf{X}) &= \ln \mathcal{L}(\lambda|\mathbf{X})\\&= -n\lambda + \left(\sum_{i=1}^n X_i\right)\ln(\lambda) - \sum_{i=1}^n \ln(X_i!)\end{aligned}
+$$
+
+To find the MLE of $\lambda$, we differentiate the log-likelihood with
+respect to $\lambda$ and set it equal to zero:
+
+$$
+\begin{aligned}\frac{\partial}{\partial \lambda}\ell(\lambda|\mathbf{X}) &= -n + \frac{\sum_{i=1}^n X_i}{\lambda} = 0\\\Rightarrow \hat{\lambda} &= \frac{1}{n}\sum_{i=1}^n X_i = \overline{X}\end{aligned}
+$$
+
+To confirm that this solution corresponds to a maximum, we compute the
+second derivative:
+
+$$
+\frac{\partial^2}{\partial \lambda^2}\ell(\lambda|\mathbf{X}) = -\frac{\sum_{i=1}^n X_i}{\lambda^2}
+$$
+
+Since this quantity is negative for all $\lambda > 0$, the
+log-likelihood is concave and $\hat{\lambda}$ is indeed the MLE.
+
+Hence, the maximum likelihood estimator for the Poisson rate parameter
+is:
+
+$$
+\boxed{\hat{\lambda} = \overline{X}}
+$$
+
+That is, the estimated rate parameter equals the sample mean of observed
+goals.
+
+For our data, the estimates can be computed separately for home and away
+goals as follows:
+
+```{r}
+# Home team goals
+lambda_home = mean(sample_long$goals[sample_long$team_side == "Home"])
+lambda_home
+
+# Away team goals
+lambda_away = mean(sample_long$goals[sample_long$team_side == "Away"])
+lambda_away
+```
+
+These estimates represent the
+\textbf{average number of goals scored per match} by home and away
+teams, respectively, during the 2023--24 English Premier League season.
+As our results show
+$\hat{\lambda}_{\text{home}} > \hat{\lambda}_{\text{away}}$, this
+supports the well-established \textit{home advantage phenomenon} in
+football.
+
+## QQ plot and Kolmogorov-Smirnov test
+
+A QQ plot can be used to provide a visual assessment of whether it may
+be reasonable to assume that the number of goals scored by teams in a
+match follows a Poisson distribution. In this context, the Poisson model
+assumes that goals occur independently and at a constant rate over the
+duration of a match.
+
+There are several ways to produce a QQ plot in `R`. Here, we compare the
+empirical quantiles of the observed data to the theoretical quantiles of
+a Poisson distribution with parameter values estimated via maximum
+likelihood:
+
+$\hat{\lambda}_{\text{home}} = `r round(lambda_home, 3)`$ for home goals
+and
+
+$\hat{\lambda}_{\text{away}} = `r round(lambda_away, 3)`$ for away
+goals.
+
+```{r qq_home, fig.cap = "QQ Plot: Home Goals vs Poisson"}
+# QQ-Plot for Home Goals
+
+ggplot(data.frame(
+
+  x = qpois(ppoints(length(home_goals)), lambda_home), 
+
+  y = sort(home_goals)), 
+
+  aes(x, y)) +
+
+  geom_point() +
+
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+
+  labs(title = "QQ Plot: Home Goals vs Poisson",
+
+       x = "Theoretical Quantiles",
+
+       y = "Observed Home Goals")
+```
+
+```{r qq_away, fig.cap = "QQ Plot: Away Goals vs Poisson"}
+# QQ-Plot for Away Goals
+
+ggplot(data.frame(
+
+  x = qpois(ppoints(length(away_goals)), lambda_away), 
+
+  y = sort(away_goals)), 
+
+  aes(x, y)) +
+
+  geom_point() +
+
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+
+  labs(title = "QQ Plot: Away Goals vs Poisson",
+
+       x = "Theoretical Quantiles",
+
+       y = "Observed Away Goals")
+
+
+```
+
+The points in both QQ plots generally align with the $y = x$ reference
+line, suggesting that the Poisson model provides a reasonable
+approximation for the goal counts. The alignment is slightly tighter for
+home goals, consistent with the lower variability observed among home
+team scoring outcomes.
+
+To formally test the adequacy of the Poisson model, we use the
+Kolmogorov--Smirnov (KS) test implemented through the `ks.test()`
+function in `R`. This test compares the empirical cumulative
+distribution function (CDF) of the data with the theoretical CDF under a
+Poisson distribution with mean parameter $\hat{\lambda}$.
+
+```{r}
+# KS Test for Home Goals
+
+ks.test(home_goals, "ppois", lambda_home)
+
+# KS Test for Away Goals
+
+ks.test(away_goals, "ppois", lambda_away)
+
+```
+
+Both tests return very small $p$-values ($p < 2.2 \times 10^{-16}$),
+indicating statistically significant deviations between the empirical
+and theoretical distributions. However, it is important to note that the
+KS test assumes a continuous reference distribution, and its application
+to discrete data such as Poisson counts can yield misleadingly small
+$p$-values and warnings regarding ties in the data.
+
+As an alternative, we apply a chi-squared goodness-of-fit test, which is
+more appropriate for discrete count data and can avoid issues with tied
+values. The expected frequencies are computed under the Poisson model
+using the MLE $\hat{\lambda}_{\text{home}}$:
+
+```{r}
+observed <- table(home_goals)
+expected <- dpois(as.numeric(names(observed)), lambda_home) * length(home_goals)
+chisq.test(x = observed, p = expected, rescale.p = TRUE)
+```
+
+The chi-squared test yields a test statistic of $\chi^2 = 4.622$ with
+$6$ degrees of freedom and a $p$-value of $p = 0.593$, indicating no
+evidence to reject the null hypothesis that home goals follow a Poisson
+distribution. Taken together with the QQ plot, this suggests that the
+Poisson model is a reasonable fit for the observed scoring data.
+
+Overall, the QQ plots and chi-squared test results support the
+assumption that both home and away goals in the 2023--24 EPL season can
+be modelled as Poisson random variables with rate parameters
+$\hat{\lambda}_{\text{home}}$ and $\hat{\lambda}_{\text{away}}$
+estimated by maximum likelihood.
+
+## Confidence Interval
+
+Our estimates of the average goals per match for home and away teams,
+$\hat{\lambda}_{\text{home}} = 1.92$ and
+$\hat{\lambda}_{\text{away}} = 1.42$, are point estimates obtained via
+maximum likelihood. To provide a range of plausible values for
+$\lambda$, we construct 95% likelihood-based confidence intervals using
+the Newton--Raphson method.
+
+As derived earlier, the relative likelihood function for the Poisson
+rate parameter is: $$
+R(\lambda) = \frac{\mathcal{L}(\lambda|\mathbf{X})}{\mathcal{L}(\hat{\lambda}|\mathbf{X})}
+= e^{-n(\lambda - \bar{X})}\left(\frac{\lambda}{\bar{X}}\right)^{n\bar{X}}.
+$$ The corresponding relative log-likelihood function is therefore: $$
+r(\lambda) = \ln R(\lambda) = -n(\lambda - \bar{X}) + n\bar{X}[\ln(\lambda) - \ln(\bar{X})].
+$$
+
+Differentiating with respect to $\lambda$ gives: $$
+\frac{dr(\lambda)}{d\lambda} = -n + \frac{n\bar{X}}{\lambda}.
+$$
+
+The Newton--Raphson algorithm can then be used to iteratively solve for
+values of $\lambda$ that satisfy $r(\lambda) = \ln(p)$, where $p$ is the
+likelihood ratio cutoff corresponding to a $100C\%$ confidence interval.
+For a 95% likelihood interval, $p$ can be calculated as: $$
+p = \exp\left\{-\frac{1}{2}\Phi^{-1}\left(\frac{1 - C}{2}\right)^2\right\}
+= \exp\left\{-\frac{1}{2}\Phi^{-1}(0.025)^2\right\}
+\approx 0.1465.
+$$
+
+In `R`, the algorithm was implemented as follows:
+
+```{r}
+LI_Poisson = function(initial_lambda, x, thresh = 4, p = 0.95, breakthresh = 5,
+                      maxiterations = 1000, print_to_screen = TRUE, makeplot = TRUE)
+{
+  xbar = mean(x) # sample mean
+  n = length(x) # sample size
+  counter = 0 # iteration counter
+  old_lambda = initial_lambda
+  lambda_vec = c(old_lambda)
+  diff_lambda = 1
+
+  while (diff_lambda > 10^(-thresh)) {
+    # Relative log-likelihood and its derivative
+    r_lambda = -n*(old_lambda - xbar) + n*xbar*(log(old_lambda) - log(xbar))
+    deriv = -n + n*xbar/old_lambda
+    new_lambda = old_lambda - (r_lambda - log(p))/deriv
+
+    lambda_vec = c(lambda_vec, new_lambda)
+    counter = counter + 1
+    if (print_to_screen == TRUE) print(c(counter, new_lambda))
+    diff_lambda = abs(old_lambda - new_lambda)
+
+    if (diff_lambda > 10^breakthresh | counter >= maxiterations) break
+    old_lambda = new_lambda
+  }
+
+  if (makeplot == TRUE) plot(lambda_vec, type = "o", xlab = "Iteration", ylab = expression(hat(lambda)))
+  converged = diff_lambda < 10^(-thresh)
+  return(list(LI_NR = new_lambda, last_iteration_diff = diff_lambda, converged = converged))
+}
+```
+
+To construct the confidence interval, we provide initial guesses below
+and above the MLE $\hat{\lambda}$ to estimate the lower and upper limits
+of the interval. The function used to convert a likelihood estimate into
+a confidence interval is below.
+
+```{r}
+# Conversion Function
+LikePFromConf = function(C = 0.95)
+{
+  exp(-1/2*qnorm((1 - C)/2)^2)
+}
+LikePFromConf(C = 0.95)
+```
+
+For the home goals data:
+
+```{r}
+
+
+LL95_Home = LI_Poisson(initial_lambda = 0.5*mean(home_goals), x = home_goals, 
+                       p = LikePFromConf(0.95))
+
+UL95_Home = LI_Poisson(initial_lambda = 2*mean(home_goals), x = home_goals, 
+                       p = LikePFromConf(0.95))
+
+```
+
+The algorithm converged after 7 iterations for the upper limit and 6 for
+the lower limit, yielding: The 95% likelihood interval for home goals is
+$(1.668, 1.938)$.
+
+Similarly, for the away goals data:
+
+```{r}
+
+LL95_Away = LI_Poisson(initial_lambda = 0.5*mean(away_goals), x = away_goals, 
+                       p = LikePFromConf(0.95))
+
+UL95_Away = LI_Poisson(initial_lambda = 2*mean(away_goals), x = away_goals, 
+                       p = LikePFromConf(0.95))
+
+```
+
+The algorithm converged after 6 iterations for both limits, giving: The
+95% likelihood interval for away goals is $(1.360, 1.605)$.
+
+Both sets of intervals indicate that the average number of goals scored
+per match by home teams is slightly higher than that of away teams. The
+relatively narrow intervals suggest that the estimates are precise, and
+the overlap between home and away goal intervals implies that while a
+home advantage exists, its magnitude is moderate.
+
+# Conclusion
+
+This project set out to determine whether the distribution of goals
+scored by teams in the 2023--24 season of the English Premier League is
+well approximated by a Poisson distribution. This was done using various
+techniques from STAT2300. The Poisson model was chosen because goal
+scoring in soccer occurs largely independently and at an approximately
+constant rate over the duration of a match.
+
+Using maximum likelihood estimation, we obtained rate parameter
+estimates of:
+
+$$
+\hat{\lambda}_{\text{home}} = 1.92 \quad \text{and} \quad \hat{\lambda}_{\text{away}} = 1.42
+$$
+
+This result is consistent with the well established home-field
+advantage, where home teams typically score more goals on average than
+away teams.
+
+Visual assessment through QQ plots showed good alignment with the
+$y = x$ reference line, especially for home goals, indicating that the
+Poisson model provides a good approximation for the observed goal
+counts.
+
+The Kolmogorov--Smirnov test produced very small $p$-values
+($p < 2.2 \times 10^{-16}$), indicating apparent deviations between the
+empirical and theoretical distributions. However, this result may be
+misleading, as the Kolmogorov--Smirnov test assumes a continuous
+reference distribution, whereas our data is discrete.
+
+Therefore, the chi-squared goodness-of-fit test was performed instead,
+producing a $p$-value of 0.593. This provided no evidence to reject the
+null hypothesis that the data follows a Poisson distribution.
+
+We constructed 95% confidence intervals using the Newton–Raphson method.
+The interval for home goals was (1.668, 1.938), while the interval for
+away goals was (1.360, 1.605). These relatively narrow intervals suggest
+that our estimates are precise and stable. Additionally, the fact that
+the home interval lies consistently above the away interval provides
+support for the presence of home advantage, while the moderate overlap
+reflects the competitive balance across teams. Together, these intervals
+strengthen the conclusion that the Poisson model not only fits the data
+well but also yields reliable estimates of scoring behavior in the EPL.
